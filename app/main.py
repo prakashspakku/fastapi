@@ -1,56 +1,84 @@
-import logging
-from typing import List
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from app.core.config import settings
-from app.compute import compute_stats, prime_factors
-from app import __version__
 
-logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s %(message)s")
-logger = logging.getLogger(settings.app_name)
+# app/main.py
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse, JSONResponse
+from typing import Dict
 
-app = FastAPI(title=settings.app_name)
+# Prometheus client for /metrics
+# Install: pip install prometheus-client
+from prometheus_client import Counter, Histogram, Gauge, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
+import time
+import os
 
-if settings.enable_metrics:
-    try:
-        from prometheus_fastapi_instrumentator import Instrumentator
-        Instrumentator().instrument(app).expose(app)
-    except Exception as e:
-        logger.warning(f"Prometheus instrumentation failed: {e}")
+app = FastAPI(title="FastAPI CI/CD Service")
 
-class StatsRequest(BaseModel):
-    values: List[float] = Field(..., description="List of numeric values")
+# -----------------------------
+# Friendly home route
+# -----------------------------
+@app.get("/")
+async def home() -> Dict[str, str]:
+    return {
+        "message": "FastAPI CI/CD service is running.",
+        "docs": "/docs",
+        "health": "/health",
+        "metrics": "/metrics"
+    }
 
-class StatsResponse(BaseModel):
-    count: float
-    mean: float
-    median: float
-    stdev: float
-
-class VersionResponse(BaseModel):
-    app: str
-    version: str
-    env: str
-
+# -----------------------------
+# Health endpoint
+# -----------------------------
+# Returns a simple JSON indicating service liveness
 @app.get("/health")
-async def health() -> dict:
+async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
-@app.get("/version", response_model=VersionResponse)
-async def version() -> VersionResponse:
-    v: str = settings.version_override or __version__
-    return VersionResponse(app=settings.app_name, version=v, env=settings.env)
+# -----------------------------
+# Basic Prometheus metrics
+# -----------------------------
+# Create a Registry to hold metrics (default global registry works too)
+# Using the default global registry for simplicity here.
+REQUEST_COUNT = Counter(
+    "app_request_count",
+    "Total HTTP requests",
+    ["method", "endpoint", "http_status"]
+)
 
-@app.post("/compute/stats", response_model=StatsResponse)
-async def stats(req: StatsRequest) -> StatsResponse:
-    try:
-        res = compute_stats(req.values)
-        return StatsResponse(**res)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+REQUEST_LATENCY = Histogram(
+    "app_request_latency_seconds",
+    "Latency of HTTP requests in seconds",
+    ["endpoint"]
+)
 
-@app.get("/compute/factors/{n}")
-async def factors(n: int) -> dict:
-    if n < 0:
-        raise HTTPException(status_code=400, detail="n must be non-negative")
-    return {"n": n, "factors": prime_factors(n)}
+APP_INFO = Gauge(
+    "app_info",
+    "Static metadata about the app (version=label)",
+    ["version"]
+)
+
+# Set an info gauge (use an env var for version if available)
+APP_INFO.labels(version=os.getenv("APP_VERSION", "1.0.0")).set(1)
+
+
+# Simple middleware to observe request count & latency
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    latency = time.perf_counter() - start
+
+    endpoint_path = request.url.path
+    REQUEST_LATENCY.labels(endpoint=endpoint_path).observe(latency)
+    REQUEST_COUNT.labels(
+        method=request.method,
+        endpoint=endpoint_path,
+        http_status=str(response.status_code)
+    ).inc()
+
+    return response
+
+
+# Expose metrics in Prometheus text format
+@app.get("/metrics")
+def metrics():
+    # Use the default collector registry
+    data = generate_latest()
