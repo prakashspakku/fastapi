@@ -104,6 +104,19 @@ Run tests:
 pytest --cov=app
 ```
 
+# FastAPI CI/CD Service
+
+A simple FastAPI app with a friendly home route, health check, and Prometheus metrics endpoint.
+
+## Quick Start
+
+```bash
+# (Optional) Create virtual env, then:
+pip install -r requirements.txt
+
+# Run the app
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
 ---
 
 ### 🧭 Run via GitHub UI (no CLI)
